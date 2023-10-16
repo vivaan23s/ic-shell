@@ -16,16 +16,17 @@
 volatile pid_t current_foreground_process = -1;
 int previous_exit_status = 0;
 
+char* input_filename = NULL;
+char* output_filename = NULL;
+
 void signal_handler(int signal) {
     if (current_foreground_process > 0) {
         switch (signal) {
             case SIGTSTP:
-                
                 kill(current_foreground_process, SIGTSTP);
-                 current_foreground_process = -1;
+                current_foreground_process = -1;
                 break;
             case SIGINT:
-                
                 kill(current_foreground_process, SIGINT);
                 current_foreground_process = -1;
                 break;
@@ -77,7 +78,7 @@ int running_program(char* command) {
     pid_t child_pid = fork();
     if (child_pid == -1) {
         perror("fork failed");
-        return 1; 
+        return 1;
     } else if (child_pid == 0) {
         char* token;
         char* args[MAX_CMD_BUFFER];
@@ -89,16 +90,16 @@ int running_program(char* command) {
             i++;
         }
         args[i] = NULL;
-        
+
         execvp(args[0], args);
         perror("execvp failed");
         exit(1);
     } else {
-        current_foreground_process = child_pid; 
+        current_foreground_process = child_pid;
         int status;
         wait(&status);
         previous_exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : 0;
-        current_foreground_process = -1; 
+        current_foreground_process = -1;
         if (WIFEXITED(status)) {
             int exit_code = WEXITSTATUS(status);
             printf("Child exit status = %d\n", exit_code);
@@ -108,28 +109,104 @@ int running_program(char* command) {
     return 0;
 }
 
+void i_o_handler(char* command) {
+    if (input_filename != NULL) {
+        // Redirect input from a file
+        FILE* input_file = fopen(input_filename, "r");
+        if (input_file == NULL) {
+            perror("Failed to open input file");
+            return;
+        }
+        dup2(fileno(input_file), STDIN_FILENO);
+        fclose(input_file);
+    }
+
+    if (output_filename != NULL) {
+        // Redirect output to a file
+        FILE* output_file = fopen(output_filename, "w");
+        if (output_file == NULL) {
+            perror("Failed to open output file");
+            return;
+        }
+        dup2(fileno(output_file), STDOUT_FILENO);
+        fclose(output_file);
+    }
+
+    char* token;
+    char* args[MAX_CMD_BUFFER];
+    int i = 0;
+    token = strtok(command, " ");
+    while (token != NULL) {
+        args[i] = token;
+        token = strtok(NULL, " ");
+        i++;
+    }
+    args[i] = NULL;
+
+    execvp(args[0], args);
+    perror("execvp failed");
+    exit(1);
+}
+
 int main(int argc, char* argv[]) {
     if (argc == 2) {
         int exit_code = script(argv[1]);
         printf("$ echo $?\n%d\n", exit_code);
         return exit_code;
     }
-    
+
     char buffer[MAX_CMD_BUFFER], last_cmd[MAX_CMD_BUFFER] = "", cmd_out[MAX_CMD_BUFFER] = "";
-   
+
     signal(SIGINT, signal_handler);
     signal(SIGTSTP, signal_handler);
     printf("Starting IC shell\n");
+
     while (1) {
         printf("icsh $ ");
         fgets(buffer, MAX_CMD_BUFFER, stdin);
         buffer[strcspn(buffer, "\n")] = 0;
+
         if (!strlen(buffer)) continue;
+
+        if (strchr(buffer, '>')) {
+            char* previous = strtok(buffer, ">");
+            char* later = strtok(NULL, ">");
+            if (previous != NULL && later != NULL) {
+                char cmd_copy[MAX_CMD_BUFFER];
+                strncpy(cmd_copy, previous, sizeof(cmd_copy) - 1);
+                cmd_copy[sizeof(cmd_copy) - 1] = '\0';
+                char* final = strtok(later, " \t\n");
+                if (final != NULL) {
+                    output_filename = final;
+                }
+            }
+        }
+        if (strchr(buffer, '<')) {
+            char* previous = strtok(buffer, "<");
+            char* later = strtok(NULL, "<");
+            if (previous != NULL && later != NULL) {
+                char cmd_copy[MAX_CMD_BUFFER];
+                strncpy(cmd_copy, previous, sizeof(cmd_copy) - 1);
+                cmd_copy[sizeof(cmd_copy) - 1] = '\0';
+
+                char* final = strtok(later, " \t\n");
+                if (final != NULL) {
+                    if (access(final, F_OK) != -1) {
+                        input_filename = final;
+                    } else {
+                        printf("Error: Input file '%s' does not exist\n", final);
+                    }
+                } else {
+                    printf("Error: Input file not specified\n");
+                }
+            }
+        }
+
         if (!strcmp(buffer, "!!")) {
             if (strlen(last_cmd)) {
                 printf("%s\n", last_cmd);
                 strcpy(buffer, last_cmd);
-                FILE *fp = popen(buffer, "r");
+                FILE* fp = popen(buffer, "r");
                 if (fp) {
                     fgets(cmd_out, MAX_CMD_BUFFER, fp);
                     pclose(fp);
@@ -140,9 +217,9 @@ int main(int argc, char* argv[]) {
             printf("%s\n", buffer + 5);
             strcpy(last_cmd, buffer);
         } else if (strncmp(buffer, "exit", 4) == 0) {
-            char *exit_code = buffer + 4;
+            char* exit_code = buffer + 4;
             if (strlen(exit_code) > 0) {
-                char *endptr;
+                char* endptr;
                 long exit_value = strtol(exit_code, &endptr, 10);
                 if (*endptr == '\0') {
                     printf("Goodbye :)\n");
@@ -157,7 +234,7 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(buffer, "echo $?") == 0) {
             printf("%d\n", previous_exit_status);
         } else {
-            running_program(buffer);
+            i_o_handler(buffer);
         }
     }
 
