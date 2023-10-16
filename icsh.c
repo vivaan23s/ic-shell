@@ -12,12 +12,25 @@
 #include <signal.h>
 
 #define MAX_CMD_BUFFER 255
+#define MAX_JOBS 10
+
+typedef struct job {
+    pid_t pid;
+    char* command;
+    int status;
+} job;
+
+job* jobs[MAX_JOBS];
+int num_jobs = 0;
 
 volatile pid_t current_foreground_process = -1;
 int previous_exit_status = 0;
 
 char* input_filename = NULL;
 char* output_filename = NULL;
+
+#define RUNNING 1
+#define TERMINATED 2
 
 void signal_handler(int signal) {
     if (current_foreground_process > 0) {
@@ -60,8 +73,6 @@ int script(char* filename) {
         } else if (strcmp(buffer, "!!") == 0) {
             if (strlen(last_echo) > 0) {
                 printf("%s\n", last_echo);
-            } else {
-                printf("bad command\n");
             }
         } else if (strncmp(buffer, "echo ", 5) == 0) {
             printf("%s\n", buffer + 5);
@@ -95,57 +106,61 @@ int running_program(char* command) {
         perror("execvp failed");
         exit(1);
     } else {
-        current_foreground_process = child_pid;
-        int status;
-        wait(&status);
-        previous_exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : 0;
-        current_foreground_process = -1;
-        if (WIFEXITED(status)) {
-            int exit_code = WEXITSTATUS(status);
-            printf("Child exit status = %d\n", exit_code);
-        }
+        job* new_job = malloc(sizeof(job));
+        new_job->pid = child_pid;
+        new_job->command = command;
+        new_job->status = RUNNING;
+        jobs[num_jobs] = new_job;
+        num_jobs++;
     }
-
     return 0;
 }
 
-void i_o_handler(char* command) {
-    if (input_filename != NULL) {
-        // Redirect input from a file
-        FILE* input_file = fopen(input_filename, "r");
-        if (input_file == NULL) {
-            perror("Failed to open input file");
-            return;
-        }
-        dup2(fileno(input_file), STDIN_FILENO);
-        fclose(input_file);
+void jobs_command() {
+    for (int i = 0; i < num_jobs; i++) {
+        job* job = jobs[i];
+        printf("[%d] %d %s\n", i + 1, job->pid, job->command);
+    }
+}
+
+void fg_command(int job_id) {
+    if (job_id > num_jobs || job_id < 1) {
+        printf("Invalid job ID\n");
+        return;
     }
 
-    if (output_filename != NULL) {
-        // Redirect output to a file
-        FILE* output_file = fopen(output_filename, "w");
-        if (output_file == NULL) {
-            perror("Failed to open output file");
-            return;
-        }
-        dup2(fileno(output_file), STDOUT_FILENO);
-        fclose(output_file);
+    job* job = jobs[job_id - 1];
+
+    if (job->status == TERMINATED) {
+        printf("Job %d has already terminated\n", job_id);
+        return;
     }
 
-    char* token;
-    char* args[MAX_CMD_BUFFER];
-    int i = 0;
-    token = strtok(command, " ");
-    while (token != NULL) {
-        args[i] = token;
-        token = strtok(NULL, " ");
-        i++;
-    }
-    args[i] = NULL;
+    kill(job->pid, SIGCONT);
+    current_foreground_process = job->pid;
 
-    execvp(args[0], args);
-    perror("execvp failed");
-    exit(1);
+    int status;
+    wait(&status);
+    previous_exit_status = WIFEXITED(status) ? WEXITSTATUS(status) : 0;
+    current_foreground_process = -1;
+    job->status = TERMINATED;
+}
+
+void bg_command(int job_id) {
+    if (job_id > num_jobs || job_id < 1) {
+        printf("Invalid job ID\n");
+        return;
+    }
+
+    job* job = jobs[job_id - 1];
+
+    if (job->status == TERMINATED) {
+        printf("Job %d has already terminated\n", job_id);
+        return;
+    }
+
+    kill(job->pid, SIGCONT);
+    job->status = RUNNING;
 }
 
 int main(int argc, char* argv[]) {
@@ -181,6 +196,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+
         if (strchr(buffer, '<')) {
             char* previous = strtok(buffer, "<");
             char* later = strtok(NULL, "<");
@@ -188,7 +204,6 @@ int main(int argc, char* argv[]) {
                 char cmd_copy[MAX_CMD_BUFFER];
                 strncpy(cmd_copy, previous, sizeof(cmd_copy) - 1);
                 cmd_copy[sizeof(cmd_copy) - 1] = '\0';
-
                 char* final = strtok(later, " \t\n");
                 if (final != NULL) {
                     if (access(final, F_OK) != -1) {
@@ -215,7 +230,7 @@ int main(int argc, char* argv[]) {
             } else continue;
         } else if (strncmp(buffer, "echo ", 5) == 0) {
             printf("%s\n", buffer + 5);
-            strcpy(last_cmd, buffer);
+            strcpy(last_cmd, buffer + 5);
         } else if (strncmp(buffer, "exit", 4) == 0) {
             char* exit_code = buffer + 4;
             if (strlen(exit_code) > 0) {
@@ -233,8 +248,28 @@ int main(int argc, char* argv[]) {
             }
         } else if (strcmp(buffer, "echo $?") == 0) {
             printf("%d\n", previous_exit_status);
+        } else if (strcmp(buffer, "jobs") == 0) {
+            jobs_command();
+        } else if (strncmp(buffer, "fg ", 3) == 0) {
+            char* job_id_str = buffer + 3;
+            char* endptr;
+            int job_id = strtol(job_id_str, &endptr, 10);
+            if (*endptr == '\0') {
+                fg_command(job_id);
+            } else {
+                printf("Invalid job ID\n");
+            }
+        } else if (strncmp(buffer, "bg ", 3) == 0) {
+            char* job_id_str = buffer + 3;
+            char* endptr;
+            int job_id = strtol(job_id_str, &endptr, 10);
+            if (*endptr == '\0') {
+                bg_command(job_id);
+            } else {
+                printf("Invalid job ID\n");
+            }
         } else {
-            i_o_handler(buffer);
+            running_program(buffer);
         }
     }
 
