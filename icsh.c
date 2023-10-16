@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #define MAX_CMD_BUFFER 255
 
@@ -46,6 +49,36 @@ int script(char* filename) {
     return exit_code;
 }
 
+int running_program(char* command) {
+    pid_t child_pid = fork();
+    if (child_pid == -1) {
+        perror("fork failed");
+    } else if (child_pid == 0) {
+        char* token;
+        char* args[MAX_CMD_BUFFER];
+        int i = 0;
+        token = strtok(command, " ");
+        while (token != NULL) {
+            args[i] = token;
+            token = strtok(NULL, " ");
+            i++;
+        }
+        args[i] = NULL;
+        execvp(args[0], args);
+        perror("execvp failed");
+        exit(1);
+    } else {
+        int status;
+        wait(&status);
+        if (WIFEXITED(status)) {
+            int exit_code = WEXITSTATUS(status);
+            printf("Child exit status = %d\n", exit_code);
+        }
+    }
+
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     if (argc == 2) {
         int exit_code = script(argv[1]);
@@ -65,7 +98,10 @@ int main(int argc, char* argv[]) {
                 printf("%s\n", last_cmd);
                 strcpy(buffer, last_cmd);
                 FILE *fp = popen(buffer, "r");
-                if (fp) { fgets(cmd_out, MAX_CMD_BUFFER, fp); pclose(fp); }
+                if (fp) {
+                    fgets(cmd_out, MAX_CMD_BUFFER, fp);
+                    pclose(fp);
+                }
                 if (strlen(cmd_out)) printf("%s", cmd_out);
             } else continue;
         } else if (!strncmp(buffer, "echo ", 5)) {
@@ -83,8 +119,9 @@ int main(int argc, char* argv[]) {
             }
             printf("Invalid exit code\n");
         } else {
-            printf("bad command\n");
+            running_program(buffer);
         }
     }
+
     return 0;
 }
